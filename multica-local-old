@@ -123,7 +123,7 @@ cmd_setup() {
 cmd_rebuild_fork() {
   require_compose_file
   if [[ ! -d "${SRC_DIR}/.git" ]]; then
-    echo "ERROR: ${SRC_DIR} is not a git repo. Set MULTICA_SRC env var or clone exocode/multica there." >&2
+    echo "ERROR: ${SRC_DIR} is not a git repo. Set MULTICA_DEV_REPO in .env or MULTICA_SRC env var." >&2
     exit 1
   fi
   if [[ ! -x "./sync-and-build.sh" ]]; then

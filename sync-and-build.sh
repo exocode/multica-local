@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# sync-and-build.sh — sync exocode/multica fork with upstream, then build artifacts.
+# sync-and-build.sh — sync your Multica fork with upstream, then build artifacts.
 #
 # What this does:
 #   1. Sanity checks (clean tree, no rebase in progress)
