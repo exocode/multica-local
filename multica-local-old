@@ -1,0 +1,205 @@
+#!/usr/bin/env bash
+# multica-local — wrapper that always uses compose.local.yml + --profile local
+#
+# Why: this folder runs a customized self-host setup with bind-mounted data
+# (./data/postgres, ./data/uploads) and pre-built local images. Running plain
+# `docker compose up` here would pick up `docker-compose.yml` (a Postgres-only
+# stub) and silently NOT start the real stack. This wrapper prevents that.
+#
+# Usage:
+#   ./multica-local up             # start backend + frontend + postgres
+#   ./multica-local stop           # stop containers (data preserved)
+#   ./multica-local restart        # stop + up
+#   ./multica-local status         # ps + daemon status
+#   ./multica-local logs           # tail backend + frontend
+#   ./multica-local backup         # pg_dump to ./backups/
+#   ./multica-local update         # backup -> pull GHCR -> up (UPSTREAM mode only)
+#   ./multica-local rebuild-fork   # backup -> rebase fork -> build -> up (FORK mode)
+#   ./multica-local setup          # first-time CLI / daemon configuration
+#   ./multica-local doctor         # sanity checks before risky ops
+#
+# Mode is auto-detected by presence of compose.fork.yml:
+#   present   -> FORK     mode (uses your locally-built fork images)
+#   absent    -> UPSTREAM mode (uses ghcr.io/multica-ai/* images)
+
+set -euo pipefail
+
+cd "$(dirname "$0")"
+COMPOSE_FILE="compose.local.yml"
+FORK_FILE="compose.fork.yml"
+PROFILE="local"
+PG_CONTAINER="multica-local-postgres-1"
+SRC_DIR="${MULTICA_SRC:-$HOME/Coding/multica-development}"
+
+# Auto-include compose.fork.yml when present (= using your fork's images)
+if [[ -f "${FORK_FILE}" ]]; then
+  DC="docker compose -f ${COMPOSE_FILE} -f ${FORK_FILE}"
+  MODE="fork"
+else
+  DC="docker compose -f ${COMPOSE_FILE}"
+  MODE="upstream-ghcr"
+fi
+
+require_compose_file() {
+  if [[ ! -f "${COMPOSE_FILE}" ]]; then
+    echo "ERROR: ${COMPOSE_FILE} not found in $(pwd)" >&2
+    exit 1
+  fi
+}
+
+backup() {
+  mkdir -p backups
+  local stamp; stamp="$(date +%Y%m%d-%H%M%S)"
+  local out="backups/multica-${stamp}.dump"
+  echo "Dumping database to ${out} ..."
+  docker exec "${PG_CONTAINER}" pg_dump -U multica -d multica -Fc > "${out}"
+  echo "Backup OK: ${out} ($(du -h "${out}" | cut -f1))"
+}
+
+cmd_up() {
+  require_compose_file
+  echo "Mode: ${MODE}"
+  ${DC} up -d
+  echo
+  echo "Frontend: http://localhost:3000"
+  echo "Backend:  http://localhost:8080"
+  echo "Login:    any email + master code 888888"
+}
+
+cmd_stop() {
+  require_compose_file
+  ${DC} stop
+  if command -v multica >/dev/null 2>&1; then
+    multica --profile "${PROFILE}" daemon stop || true
+  fi
+}
+
+cmd_restart() {
+  cmd_stop
+  cmd_up
+}
+
+cmd_status() {
+  require_compose_file
+  ${DC} ps
+  echo
+  if command -v multica >/dev/null 2>&1; then
+    multica --profile "${PROFILE}" daemon status || true
+  fi
+}
+
+cmd_logs() {
+  require_compose_file
+  ${DC} logs -f --tail=200 backend frontend
+}
+
+cmd_backup() {
+  backup
+}
+
+cmd_update() {
+  require_compose_file
+  echo ">> Step 1/4: backup"
+  backup
+  echo
+  echo ">> Step 2/4: pull latest GHCR images"
+  ${DC} pull
+  echo
+  echo ">> Step 3/4: recreate containers — bind-mounted data is untouched"
+  ${DC} up -d
+  echo
+  echo ">> Step 4/4: tail backend until migrations finish (Ctrl-C to detach)"
+  ${DC} logs -f --tail=80 backend
+}
+
+cmd_setup() {
+  if ! command -v multica >/dev/null 2>&1; then
+    echo "ERROR: 'multica' CLI not on PATH. Install with: brew install multica-ai/tap/multica" >&2
+    exit 1
+  fi
+  multica --profile "${PROFILE}" setup self-host --port 8080 --frontend-port 3000
+}
+
+cmd_rebuild_fork() {
+  require_compose_file
+  if [[ ! -d "${SRC_DIR}/.git" ]]; then
+    echo "ERROR: ${SRC_DIR} is not a git repo. Set MULTICA_SRC env var or clone exocode/multica there." >&2
+    exit 1
+  fi
+  if [[ ! -x "./sync-and-build.sh" ]]; then
+    echo "ERROR: ./sync-and-build.sh not executable. Run: chmod +x sync-and-build.sh" >&2
+    exit 1
+  fi
+  echo ">> Step 1/3: backup current database"
+  if docker ps --format '{{.Names}}' | grep -q "^${PG_CONTAINER}$"; then
+    backup
+  else
+    echo "(stack not running — skipping backup)"
+  fi
+  echo
+  echo ">> Step 2/3: sync fork with upstream and build artifacts"
+  MULTICA_SRC="${SRC_DIR}" ./sync-and-build.sh
+  echo
+  echo ">> Step 3/3: recreate stack with new fork images"
+  if [[ ! -f "${FORK_FILE}" ]]; then
+    echo "WARNING: ${FORK_FILE} not present — your stack will still run upstream GHCR images." >&2
+    echo "         Re-run after creating ${FORK_FILE}." >&2
+    exit 1
+  fi
+  ${DC} up -d
+  echo
+  echo ">> Tailing backend logs (Ctrl-C to detach)"
+  ${DC} logs -f --tail=80 backend
+}
+
+cmd_doctor() {
+  require_compose_file
+  echo "== mode =="
+  echo "${MODE}  ($(if [[ "$MODE" == "fork" ]]; then echo "compose.local.yml + compose.fork.yml"; else echo "compose.local.yml only"; fi))"
+  echo
+  echo "== compose files in use =="
+  echo "${DC}" | tr ' ' '\n' | grep -v '^docker$\|^compose$\|^-f$' | grep -v '^$'
+  echo
+  echo "== services defined =="
+  ${DC} config --services
+  echo
+  echo "== mount points (should be ./data/postgres and ./data/uploads) =="
+  ${DC} config | awk '/volumes:/{flag=1;print;next} /^[a-z]/{flag=0} flag'
+  echo
+  echo "== running containers =="
+  ${DC} ps
+  echo
+  echo "== JWT_SECRET set? =="
+  if [[ -f .env ]] && grep -q '^JWT_SECRET=' .env && ! grep -q '^JWT_SECRET=change-me-in-production' .env; then
+    echo "OK"
+  else
+    echo "MISSING or default — fix with:"
+    echo "  sed -i '' \"s/^JWT_SECRET=.*/JWT_SECRET=\$(openssl rand -hex 32)/\" .env"
+  fi
+  echo
+  echo "== local images present? =="
+  docker image ls --format '{{.Repository}}:{{.Tag}}' | grep -E '^(multica-backend|multica-frontend|pgvector/pgvector):' || echo "NONE FOUND — see OPERATIONS.md"
+}
+
+usage() {
+  sed -n '2,18p' "$0"
+}
+
+case "${1:-}" in
+  up)             cmd_up ;;
+  stop)           cmd_stop ;;
+  restart)        cmd_restart ;;
+  status)         cmd_status ;;
+  logs)           cmd_logs ;;
+  backup)         cmd_backup ;;
+  update)         cmd_update ;;
+  setup)          cmd_setup ;;
+  rebuild-fork)   cmd_rebuild_fork ;;
+  doctor)         cmd_doctor ;;
+  ""|-h|--help)   usage ;;
+  *)
+    echo "Unknown command: $1" >&2
+    usage
+    exit 1
+    ;;
+esac

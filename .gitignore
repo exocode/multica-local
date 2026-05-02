@@ -1,0 +1,14 @@
+# Secrets — copy .env.example to .env and fill in your values
+.env
+
+# Persistent data — lives outside Docker so it survives image rebuilds
+data/
+
+# Database dumps created by ./multica-local backup
+backups/
+
+# Claude Code session data
+.claude/
+
+# macOS
+.DS_Store

@@ -1,0 +1,15 @@
+# compose.fork.yml — Docker Compose override that switches backend + frontend
+# from the upstream GHCR images to your locally-built fork images.
+#
+# Activated automatically by ./multica-local when this file is present.
+# To revert to upstream/GHCR: rename or delete this file.
+#
+# These tags are produced by sync-and-build.sh. Run that first, otherwise
+# `docker compose up` will fail with "image not found".
+
+services:
+  backend:
+    image: multica-backend:exocode
+
+  frontend:
+    image: multica-frontend:exocode

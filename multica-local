@@ -1,0 +1,297 @@
+#!/usr/bin/env bash
+# multica-local — wrapper that always uses compose.local.yml + --profile local
+#
+# Why: this folder runs a customized self-host setup with bind-mounted data
+# (./data/postgres, ./data/uploads) and pre-built local images. Running plain
+# `docker compose up` here would pick up `docker-compose.yml` (a Postgres-only
+# stub) and silently NOT start the real stack. This wrapper prevents that.
+#
+# Usage:
+#   ./multica-local up         # start backend + frontend + postgres
+#   ./multica-local stop       # stop containers (data preserved)
+#   ./multica-local restart    # stop + up
+#   ./multica-local status     # ps + daemon status
+#   ./multica-local logs       # tail backend + frontend
+#   ./multica-local backup     # pg_dump to ./backups/
+#   ./multica-local update        # backup -> pull GHCR -> up (UPSTREAM mode only)
+#   ./multica-local rebuild-fork  # backup -> rebase fork -> build -> up (FORK mode)
+#   ./multica-local setup         # first-time CLI / daemon configuration
+#   ./multica-local doctor        # sanity checks before risky ops
+#   ./multica-local build-app     # build desktop .app pointing to this local instance
+#
+# Mode is auto-detected by presence of compose.fork.yml:
+#   present   -> FORK     mode (uses your locally-built fork images)
+#   absent    -> UPSTREAM mode (uses ghcr.io/multica-ai/* images)
+
+set -euo pipefail
+
+cd "$(dirname "$0")"
+COMPOSE_FILE="compose.local.yml"
+FORK_FILE="compose.fork.yml"
+PROFILE="local"
+PG_CONTAINER="multica-local-postgres-1"
+
+# Read repo paths from .env (~ expanded), allow env var override
+_env() { grep "^${1}=" .env 2>/dev/null | cut -d= -f2- | sed "s|^~|${HOME}|"; }
+SRC_DIR="${MULTICA_SRC:-$(_env MULTICA_DEV_REPO)}"
+SRC_DIR="${SRC_DIR:-${HOME}/Coding/github/multica-development}"
+UPSTREAM_DIR="${MULTICA_UPSTREAM_REPO:-$(_env MULTICA_UPSTREAM_REPO)}"
+UPSTREAM_DIR="${UPSTREAM_DIR:-${HOME}/Coding/github/multica}"
+
+# Auto-include compose.fork.yml when present (= using your fork's images)
+if [[ -f "${FORK_FILE}" ]]; then
+  DC="docker compose -f ${COMPOSE_FILE} -f ${FORK_FILE}"
+  MODE="fork"
+else
+  DC="docker compose -f ${COMPOSE_FILE}"
+  MODE="upstream-ghcr"
+fi
+
+require_compose_file() {
+  if [[ ! -f "${COMPOSE_FILE}" ]]; then
+    echo "ERROR: ${COMPOSE_FILE} not found in $(pwd)" >&2
+    exit 1
+  fi
+}
+
+backup() {
+  mkdir -p backups
+  local stamp; stamp="$(date +%Y%m%d-%H%M%S)"
+  local out="backups/multica-${stamp}.dump"
+  echo "Dumping database to ${out} ..."
+  docker exec "${PG_CONTAINER}" pg_dump -U multica -d multica -Fc > "${out}"
+  echo "Backup OK: ${out} ($(du -h "${out}" | cut -f1))"
+}
+
+daemon_restart_and_auth() {
+  multica --profile "${PROFILE}" daemon stop 2>/dev/null || true
+  sleep 1
+  multica --profile "${PROFILE}" daemon start
+  sleep 3
+
+  local log=~/.multica/profiles/${PROFILE}/daemon.log
+  if grep -q "not authenticated" "${log}" 2>/dev/null && ! grep -q "^$(date +%Y-%m-%d).*authenticated " "${log}" 2>/dev/null; then
+    echo
+    echo ">> Login required — enter your email; verification code arrives by email or prints to stdout:"
+    multica --profile "${PROFILE}" daemon stop 2>/dev/null || true
+    multica --profile "${PROFILE}" login
+    multica --profile "${PROFILE}" daemon start
+    sleep 2
+  fi
+
+  echo
+  multica --profile "${PROFILE}" daemon status
+}
+
+cmd_up() {
+  require_compose_file
+  echo "Mode: ${MODE}"
+  ${DC} up -d --quiet-pull 2>/dev/null
+  echo
+  echo "Frontend: http://localhost:3000"
+  echo "Backend:  http://localhost:8080"
+  echo "Login:    any email + master code 888888"
+  echo
+  daemon_restart_and_auth
+}
+
+cmd_stop() {
+  require_compose_file
+  ${DC} stop
+  if command -v multica >/dev/null 2>&1; then
+    multica --profile "${PROFILE}" daemon stop || true
+  fi
+}
+
+cmd_restart() {
+  cmd_stop
+  cmd_up
+}
+
+cmd_status() {
+  require_compose_file
+  ${DC} ps
+  echo
+  if command -v multica >/dev/null 2>&1; then
+    multica --profile "${PROFILE}" daemon status || true
+  fi
+}
+
+cmd_logs() {
+  require_compose_file
+  ${DC} logs -f --tail=200 backend frontend
+}
+
+cmd_backup() {
+  backup
+}
+
+cmd_update() {
+  require_compose_file
+  echo ">> Step 1/4: backup"
+  backup
+  echo
+  echo ">> Step 2/4: pull latest GHCR images"
+  ${DC} pull
+  echo
+  echo ">> Step 3/4: recreate containers — bind-mounted data is untouched"
+  ${DC} up -d --quiet-pull 2>/dev/null
+  echo
+  echo ">> Step 4/4: tail backend until migrations finish (Ctrl-C to detach)"
+  ${DC} logs -f --tail=80 backend
+
+}
+
+cmd_setup() {
+  if ! command -v multica >/dev/null 2>&1; then
+    echo "ERROR: 'multica' CLI not on PATH. Install with: brew install multica-ai/tap/multica" >&2
+    exit 1
+  fi
+  multica --profile "${PROFILE}" setup self-host --port 8080 --frontend-port 3000
+}
+
+cmd_rebuild_fork() {
+  require_compose_file
+  if [[ ! -d "${SRC_DIR}/.git" ]]; then
+    echo "ERROR: ${SRC_DIR} is not a git repo. Set MULTICA_SRC env var or clone exocode/multica there." >&2
+    exit 1
+  fi
+  if [[ ! -x "./sync-and-build.sh" ]]; then
+    echo "ERROR: ./sync-and-build.sh not executable. Run: chmod +x sync-and-build.sh" >&2
+    exit 1
+  fi
+
+  echo ">> Step 1/4: backup current database"
+  if docker ps --format '{{.Names}}' | grep -q "^${PG_CONTAINER}$"; then
+    backup
+  else
+    echo "(stack not running — skipping backup)"
+  fi
+  echo
+
+  echo ">> Step 2/4: sync fork with upstream and build artifacts"
+  MULTICA_SRC="${SRC_DIR}" ./sync-and-build.sh
+  echo
+
+  echo ">> Step 3/4: recreate stack with new fork images"
+  if [[ ! -f "${FORK_FILE}" ]]; then
+    echo "WARNING: ${FORK_FILE} not present — stack will run upstream GHCR images." >&2
+    echo "         Re-run after creating ${FORK_FILE}." >&2
+    exit 1
+  fi
+  ${DC} up -d --quiet-pull 2>/dev/null
+  echo
+
+  echo ">> Step 4/4: restart daemon and verify authentication"
+  daemon_restart_and_auth
+}
+
+cmd_build_app() {
+  local repo="${UPSTREAM_DIR}"
+  local desktop="${repo}/apps/desktop"
+  local env_override="${desktop}/.env.production.local"
+
+  if [[ ! -d "${desktop}" ]]; then
+    echo "ERROR: Desktop repo not found at ${desktop}" >&2
+    exit 1
+  fi
+  if ! command -v pnpm >/dev/null 2>&1; then
+    echo "ERROR: pnpm not on PATH" >&2
+    exit 1
+  fi
+
+  # Read connection values from local .env
+  local port app_url ws_url
+  port="$(grep '^PORT=' .env | cut -d= -f2)"
+  app_url="$(grep '^MULTICA_APP_URL=' .env | cut -d= -f2)"
+  ws_url="$(grep '^MULTICA_SERVER_URL=' .env | cut -d= -f2)"
+
+  port="${port:-8080}"
+  app_url="${app_url:-http://localhost:3000}"
+  ws_url="${ws_url:-ws://localhost:8080/ws}"
+
+  local api_url="http://localhost:${port}"
+
+  echo "== Building desktop app for local instance =="
+  echo "   VITE_API_URL = ${api_url}"
+  echo "   VITE_WS_URL  = ${ws_url}"
+  echo "   VITE_APP_URL = ${app_url}"
+  echo
+
+  # Write a temporary override file; electron-vite picks it up over .env.production
+  cat > "${env_override}" << EOF
+VITE_API_URL=${api_url}
+VITE_WS_URL=${ws_url}
+VITE_APP_URL=${app_url}
+EOF
+
+  # Remove override file on exit or interruption
+  trap "rm -f '${env_override}'" EXIT
+
+  echo ">> pnpm install"
+  (cd "${repo}" && pnpm install --frozen-lockfile)
+  echo
+  echo ">> pnpm build (desktop)"
+  (cd "${desktop}" && pnpm build)
+  echo
+  echo ">> pnpm package"
+  (cd "${desktop}" && pnpm package)
+
+  rm -f "${env_override}"
+  trap - EXIT
+
+  local dist="${desktop}/dist"
+  echo
+  echo "== Done! App is at: ${dist} =="
+  ls "${dist}"/*.dmg "${dist}"/*.app 2>/dev/null || ls "${dist}/"
+}
+
+cmd_doctor() {
+  require_compose_file
+  echo "== mode =="
+  echo "${MODE}  ($(if [[ "$MODE" == "fork" ]]; then echo "compose.local.yml + compose.fork.yml"; else echo "compose.local.yml only"; fi))"
+  echo
+  echo "== services defined =="
+  ${DC} config --services
+  echo
+  echo "== mount points (should be ./data/postgres and ./data/uploads) =="
+  ${DC} config | awk '/volumes:/{flag=1;print;next} /^[a-z]/{flag=0} flag'
+  echo
+  echo "== running containers =="
+  ${DC} ps
+  echo
+  echo "== JWT_SECRET set? =="
+  if [[ -f .env ]] && grep -q '^JWT_SECRET=' .env && ! grep -q '^JWT_SECRET=change-me-in-production' .env; then
+    echo "OK"
+  else
+    echo "MISSING or default — fix with:"
+    echo "  sed -i '' \"s/^JWT_SECRET=.*/JWT_SECRET=\$(openssl rand -hex 32)/\" .env"
+  fi
+  echo
+  echo "== local images present? =="
+  docker image ls --format '{{.Repository}}:{{.Tag}}' | grep -E '^(multica-backend|multica-frontend|pgvector/pgvector):' || echo "NONE FOUND — see OPERATIONS.md"
+}
+
+usage() {
+  sed -n '2,25p' "$0"
+}
+
+case "${1:-}" in
+  up)       cmd_up ;;
+  stop)     cmd_stop ;;
+  restart)  cmd_restart ;;
+  status)   cmd_status ;;
+  logs)     cmd_logs ;;
+  backup)   cmd_backup ;;
+  update)   cmd_update ;;
+  setup)    cmd_setup ;;
+  rebuild-fork) cmd_rebuild_fork ;;
+  doctor)       cmd_doctor ;;
+  build-app)    cmd_build_app ;;
+  ""|-h|--help) usage ;;
+  *)
+    echo "Unknown command: $1" >&2
+    usage
+    exit 1
+    ;;
+esac
