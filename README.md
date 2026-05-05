@@ -56,6 +56,7 @@ The `up` command starts all containers, then restarts the Multica daemon and pro
 | `./multica-local update` | Backup → pull latest GHCR images → up *(upstream mode only)* |
 | `./multica-local rebuild-fork` | Backup → rebase fork → build images → up + daemon *(fork mode)* |
 | `./multica-local setup` | First-time CLI / daemon configuration |
+| `./multica-local daemon up|start|down|stop|restart|status|logs` | Control only the Multica daemon through the same wrapper |
 | `./multica-local doctor` | Sanity checks (ports, volumes, JWT_SECRET, images) |
 | `./multica-local build-app` | Build the Electron desktop app pointing to this local instance |
 

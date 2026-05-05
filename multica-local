@@ -31,8 +31,62 @@ FORK_FILE="compose.fork.yml"
 PROFILE="local"
 PG_CONTAINER="multica-local-postgres-1"
 
-# Read repo paths from .env (~ expanded), allow env var override
-_env() { grep "^${1}=" .env 2>/dev/null | cut -d= -f2- | sed "s|^~|${HOME}|"; }
+fail() {
+  echo "ERROR: $*" >&2
+  exit 1
+}
+
+require_docker() {
+  command -v docker >/dev/null 2>&1 || fail "docker not on PATH"
+  docker info >/dev/null 2>&1 || fail "docker daemon is not running — start Docker Desktop first"
+}
+
+require_multica() {
+  command -v multica >/dev/null 2>&1 || fail "multica CLI not on PATH. Install with: brew install multica-ai/tap/multica"
+}
+
+run_compose() {
+  require_docker
+  ${DC} "$@"
+}
+
+run_multica() {
+  require_multica
+  multica --profile "${PROFILE}" "$@"
+}
+
+cmd_daemon() {
+  local subcmd="${1:-}"
+  case "${subcmd}" in
+    up|start)    run_multica daemon start ;;
+    down|stop)   run_multica daemon stop ;;
+    restart)     run_multica daemon restart ;;
+    status)      run_multica daemon status ;;
+    logs)        run_multica daemon logs ;;
+    ""|-h|--help)
+      echo "Usage: ./multica-local daemon <up|start|down|stop|restart|status|logs>"
+      echo
+      echo "Aliases: up=start, down=stop"
+      ;;
+    *)
+      echo "Unknown daemon subcommand: ${subcmd}" >&2
+      echo "Use: ./multica-local daemon <up|start|down|stop|restart|status|logs>" >&2
+      exit 1
+      ;;
+  esac
+}
+
+# Read repo paths from .env (~ expanded), allow env var override.
+# Missing keys must not abort the wrapper: up/status should still work with
+# built-in defaults even if .env does not define the repo paths yet.
+_env() {
+  [[ -f .env ]] || return 0
+  local value
+  value="$(grep -m1 "^${1}=" .env 2>/dev/null | cut -d= -f2- || true)"
+  value="${value#\"}"
+  value="${value%\"}"
+  printf '%s' "${value}" | sed "s|^~|${HOME}|"
+}
 SRC_DIR="${MULTICA_SRC:-$(_env MULTICA_DEV_REPO)}"
 SRC_DIR="${SRC_DIR:-${HOME}/Coding/github/multica-development}"
 UPSTREAM_DIR="${MULTICA_UPSTREAM_REPO:-$(_env MULTICA_UPSTREAM_REPO)}"
@@ -55,6 +109,7 @@ require_compose_file() {
 }
 
 backup() {
+  require_docker
   mkdir -p backups
   local stamp; stamp="$(date +%Y%m%d-%H%M%S)"
   local out="backups/multica-${stamp}.dump"
@@ -86,7 +141,7 @@ daemon_restart_and_auth() {
 cmd_up() {
   require_compose_file
   echo "Mode: ${MODE}"
-  ${DC} up -d --quiet-pull 2>/dev/null
+  run_compose up -d --quiet-pull
   echo
   echo "Frontend: http://localhost:3000"
   echo "Backend:  http://localhost:8080"
@@ -97,9 +152,9 @@ cmd_up() {
 
 cmd_stop() {
   require_compose_file
-  ${DC} stop
+  run_compose stop
   if command -v multica >/dev/null 2>&1; then
-    multica --profile "${PROFILE}" daemon stop || true
+    run_multica daemon stop || true
   fi
 }
 
@@ -110,16 +165,16 @@ cmd_restart() {
 
 cmd_status() {
   require_compose_file
-  ${DC} ps
+  run_compose ps
   echo
   if command -v multica >/dev/null 2>&1; then
-    multica --profile "${PROFILE}" daemon status || true
+    run_multica daemon status || true
   fi
 }
 
 cmd_logs() {
   require_compose_file
-  ${DC} logs -f --tail=200 backend frontend
+  run_compose logs -f --tail=200 backend frontend
 }
 
 cmd_backup() {
@@ -132,14 +187,13 @@ cmd_update() {
   backup
   echo
   echo ">> Step 2/4: pull latest GHCR images"
-  ${DC} pull
+  run_compose pull
   echo
   echo ">> Step 3/4: recreate containers — bind-mounted data is untouched"
-  ${DC} up -d --quiet-pull 2>/dev/null
+  run_compose up -d --quiet-pull
   echo
   echo ">> Step 4/4: tail backend until migrations finish (Ctrl-C to detach)"
-  ${DC} logs -f --tail=80 backend
-
+  run_compose logs -f --tail=80 backend
 }
 
 cmd_setup() {
@@ -179,7 +233,7 @@ cmd_rebuild_fork() {
     echo "         Re-run after creating ${FORK_FILE}." >&2
     exit 1
   fi
-  ${DC} up -d --quiet-pull 2>/dev/null
+  run_compose up -d --quiet-pull
   echo
 
   echo ">> Step 4/4: restart daemon and verify authentication"
@@ -277,21 +331,22 @@ usage() {
 }
 
 case "${1:-}" in
-  up)       cmd_up ;;
-  stop)     cmd_stop ;;
-  restart)  cmd_restart ;;
-  status)   cmd_status ;;
-  logs)     cmd_logs ;;
-  backup)   cmd_backup ;;
-  update)   cmd_update ;;
-  setup)    cmd_setup ;;
-  rebuild-fork) cmd_rebuild_fork ;;
-  doctor)       cmd_doctor ;;
-  build-app)    cmd_build_app ;;
+  up)            cmd_up ;;
+  stop)          cmd_stop ;;
+  restart)       cmd_restart ;;
+  status)        cmd_status ;;
+  logs)          cmd_logs ;;
+  backup)        cmd_backup ;;
+  update)        cmd_update ;;
+  setup)         cmd_setup ;;
+  rebuild-fork)  cmd_rebuild_fork ;;
+  doctor)        cmd_doctor ;;
+  build-app)     cmd_build_app ;;
+  daemon)        cmd_daemon "${2:-}" ;;
   ""|-h|--help) usage ;;
   *)
     echo "Unknown command: $1" >&2
     usage
     exit 1
     ;;
-esac
+  esac
