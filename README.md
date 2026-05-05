@@ -8,6 +8,26 @@ The official Multica repo ships Docker images via GHCR that point to `api.multic
 
 It also supports running a **custom fork** (e.g. with a `kilo-code-adapter` branch that registers additional AI runtimes like KiloCode) alongside the standard upstream images, and building a **local Desktop app** that connects to this instance instead of the cloud.
 
+## Cheat sheet
+
+```bash
+./multica-local up
+./multica-local setup
+./multica-local status
+./multica-local stop
+./multica-local logs
+./multica-local update
+./multica-local rebuild-fork
+./multica-local daemon restart
+./multica-local daemon status
+```
+
+- `up` = start backend + frontend + postgres, then restart the daemon
+- `setup` = one-time CLI/daemon setup for localhost:8080/3000
+- `update` = backup + pull GHCR images + recreate stack
+- `rebuild-fork` = backup + rebase/build local fork images + restart stack + daemon
+- `daemon …` = direct Multica daemon control through the same wrapper
+
 ---
 
 ## Prerequisites
