@@ -32,26 +32,25 @@ different setup (the bare `docker-compose.yml` Postgres-only stub) and
 ```bash
 cd ~/Coding/multica
 
-# Start everything
-docker compose -f compose.local.yml up -d
+# Start everything via the wrapper
+./multica-local up
 
 # Status
-docker compose -f compose.local.yml ps
+./multica-local status
 
 # Stop (safe)
-docker compose -f compose.local.yml stop
+./multica-local stop
 
 # Logs (tail)
-docker compose -f compose.local.yml logs -f --tail=200
+./multica-local logs
 ```
 
 CLI / daemon (only needed once after install or when re-authenticating):
 
 ```bash
-multica --profile local setup self-host --port 8080 --frontend-port 3000
-multica --profile local login
-multica --profile local daemon restart
-multica --profile local daemon status
+./multica-local setup
+./multica-local daemon restart
+./multica-local daemon status
 ```
 
 Open: http://localhost:3000 — login email + master code `888888`.
@@ -64,8 +63,8 @@ Open: http://localhost:3000 — login email + master code `888888`.
 
 ```bash
 cd ~/Coding/multica
-docker compose -f compose.local.yml up -d
-multica --profile local daemon status   # sanity check
+./multica-local up
+./multica-local daemon status   # sanity check
 ```
 
 That's it. Containers start, Postgres mounts `./data/postgres`, backend
@@ -85,13 +84,14 @@ auto-runs migrations, frontend connects.
    # If it shows the default, regenerate:
    #   sed -i '' "s/^JWT_SECRET=.*/JWT_SECRET=$(openssl rand -hex 32)/" .env
    ```
-4. Start containers:
+4. Start everything and configure the daemon:
    ```bash
-   docker compose -f compose.local.yml up -d
+   ./multica-local up
+   ./multica-local setup
    ```
-5. Wait ~10s, then configure CLI:
+5. Verify daemon status:
    ```bash
-   multica --profile local setup self-host --port 8080 --frontend-port 3000
+   ./multica-local daemon status
    ```
 
 > **Important:** `multica setup self-host` does **not** start Docker. It only
@@ -104,11 +104,11 @@ auto-runs migrations, frontend connects.
 
 ```bash
 cd ~/Coding/multica
-docker compose -f compose.local.yml stop
-multica --profile local daemon stop
+./multica-local stop
+./multica-local daemon stop
 ```
 
-`stop` keeps containers around so the next `up -d` is fast. Use `down`
+`stop` keeps containers around so the next `up` is fast. Use `down`
 (without `-v`!) only if you want to fully remove containers.
 
 ---
@@ -124,6 +124,10 @@ cd ~/Coding/multica
 
 # Easiest — wrapper does backup + pull + up + log-tail in one shot
 ./multica-local update
+
+# Or, if you just want to control the daemon through the wrapper
+./multica-local daemon restart
+./multica-local daemon status
 ```
 
 Manually, if you prefer:
