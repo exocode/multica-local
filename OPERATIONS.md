@@ -53,7 +53,7 @@ CLI / daemon (only needed once after install or when re-authenticating):
 ./multica-local daemon status
 ```
 
-Open: http://localhost:3000 — login email + master code `888888`.
+Open: http://localhost:9000 — login email + master code `888888`.
 
 ---
 
