@@ -6,22 +6,60 @@
 # `docker compose up` here would pick up `docker-compose.yml` (a Postgres-only
 # stub) and silently NOT start the real stack. This wrapper prevents that.
 #
-# Usage:
-#   ./multica-local up         # start backend + frontend + postgres
+# ── DAILY COMMANDS ─────────────────────────────────────────────────────────────
+#   ./multica-local up         # start backend + frontend + postgres + daemon
 #   ./multica-local stop       # stop containers (data preserved)
 #   ./multica-local restart    # stop + up
 #   ./multica-local status     # ps + daemon status
 #   ./multica-local logs       # tail backend + frontend
 #   ./multica-local backup     # pg_dump to ./backups/
-#   ./multica-local update        # backup -> pull GHCR -> up (UPSTREAM mode only)
-#   ./multica-local rebuild-fork  # backup -> rebase fork -> build -> up (FORK mode)
-#   ./multica-local setup         # first-time CLI / daemon configuration
-#   ./multica-local doctor        # sanity checks before risky ops
-#   ./multica-local build-app     # build desktop .app pointing to this local instance
+#   ./multica-local refresh    # recreate containers with current .env
+#                              #   use after: port changes, .env edits
 #
-# Mode is auto-detected by presence of compose.fork.yml:
-#   present   -> FORK     mode (uses your locally-built fork images)
-#   absent    -> UPSTREAM mode (uses ghcr.io/multica-ai/* images)
+# ── UPDATE COMMANDS ────────────────────────────────────────────────────────────
+#   ./multica-local rebuild-fork   ← YOUR NORMAL UPDATE (FORK mode)
+#     When: upstream has new commits OR you changed your KiloCode adapter code
+#     Does:  1. DB backup
+#            2. git fetch upstream + rebase kilo-code-adapter branch
+#            3. make build  → installs new multica CLI to ~/.local/bin/multica
+#            4. docker build → multica-backend:exocode + multica-frontend:exocode
+#            5. docker compose up with new images
+#            6. daemon restart (--profile local)
+#     = the one command that rebuilds everything end-to-end
+#
+#   ./multica-local update         ← only in UPSTREAM mode (no compose.fork.yml)
+#     When: compose.fork.yml is absent — running official GHCR images
+#     Does:  backup -> docker pull GHCR latest -> up -> tail backend logs
+#     Note:  not relevant while KiloCode adapter lives in your fork only
+#
+# ── SPECIAL COMMANDS ───────────────────────────────────────────────────────────
+#   ./multica-local build-app  # build macOS desktop .app hardwired to this instance
+#                              #   use when: official Multica.app points to cloud
+#                              #   and you want a local-only desktop app
+#                              #   sets VITE_API_URL=:8080, VITE_APP_URL=:9000
+#
+#   ./multica-local daemon <up|down|restart|status|logs>
+#                              # control daemon only (no Docker changes)
+#
+#   ./multica-local setup      # first-time: CLI auth + daemon configuration
+#   ./multica-local doctor     # sanity checks before risky operations
+#
+# ── MODE (auto-detected) ───────────────────────────────────────────────────────
+#   compose.fork.yml present  -> FORK mode     (your locally-built images)
+#   compose.fork.yml absent   -> UPSTREAM mode (ghcr.io/multica-ai/* images)
+#
+# ── TYPICAL WORKFLOWS ──────────────────────────────────────────────────────────
+#   Upstream has new commits or you changed the KiloCode adapter:
+#     ./multica-local rebuild-fork
+#
+#   Only .env changed (e.g. port):
+#     ./multica-local refresh
+#
+#   Only daemon is down (containers already running):
+#     ./multica-local daemon restart
+#
+#   Build a desktop app pinned to this local instance:
+#     ./multica-local build-app
 
 set -euo pipefail
 
@@ -326,11 +364,30 @@ cmd_doctor() {
   docker image ls --format '{{.Repository}}:{{.Tag}}' | grep -E '^(multica-backend|multica-frontend|pgvector/pgvector):' || echo "NONE FOUND — see OPERATIONS.md"
 }
 
+cmd_refresh() {
+  require_compose_file
+  echo ">> Refreshing containers (recreate with current .env)..."
+  FRONTEND_PORT="$(grep '^FRONTEND_PORT=' .env 2>/dev/null | cut -d= -f2)"
+  PORT="$(grep '^PORT=' .env 2>/dev/null | cut -d= -f2)"
+  echo "   FRONTEND_PORT=${FRONTEND_PORT:-9000}"
+  echo "   PORT=${PORT:-8080}"
+  echo
+  # Stop + remove old containers so port mappings are re-read from .env on next up
+  ${DC} stop frontend backend 2>/dev/null || true
+  sleep 1
+  ${DC} rm -sf frontend backend 2>/dev/null || true
+  ${DC} up -d --quiet-pull
+  echo
+  echo "Frontend: http://localhost:${FRONTEND_PORT:-9000}"
+  echo "Backend:  http://localhost:${PORT:-8080}"
+}
+
 usage() {
-  sed -n '2,25p' "$0"
+  sed -n '2,62p' "$0"
 }
 
 case "${1:-}" in
+  refresh)        cmd_refresh ;;
   up)            cmd_up ;;
   stop)          cmd_stop ;;
   restart)       cmd_restart ;;

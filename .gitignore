@@ -12,3 +12,6 @@ backups/
 
 # macOS
 .DS_Store
+
+# VSCode history
+.history/
